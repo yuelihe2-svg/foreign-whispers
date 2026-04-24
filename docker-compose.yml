@@ -29,25 +29,30 @@ services:
   chatterbox-gpu:
     container_name: foreign-whispers-tts
     profiles: [nvidia]
-    image: travisvn/chatterbox-tts-api:latest
+    # image: travisvn/chatterbox-tts-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
     restart: unless-stopped
     shm_size: "8gb"
     ports:
       - "8020:8020"
     environment:
-      - DEVICE=cuda
+      - DEVICE=cpu 
       - DEFAULT_MODEL=multilingual
       - PORT=8020
+    
     volumes:
       - chatterbox-models:/app/models
       - ./pipeline_data/speakers:/app/voices
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: all
+    #          capabilities: [gpu]
+          
 
   # ── API (CPU orchestrator) — all profiles ─────────────────────────
   # The API container is CPU-only. It delegates GPU work to the STT
@@ -62,11 +67,15 @@ services:
         USER_UID: "${UID:-1000}"
         USER_GID: "${GID:-1000}"
     restart: unless-stopped
-    network_mode: host
+    # network_mode: host
+    ports:
+    - "8080:8080"
     command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
-      - CHATTERBOX_API_URL=http://localhost:8020
+      - CHATTERBOX_API_URL=http://chatterbox-gpu:8020
       - FW_WHISPER_MODEL=base
+      - FW_HF_TOKEN=${FW_HF_TOKEN}
+      - HF_ENDPOINT=https://hf-mirror.com
     volumes:
       - ./pipeline_data:/app/pipeline_data
       - ./foreign_whispers:/app/foreign_whispers
@@ -81,7 +90,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
-    network_mode: host
+    # network_mode: host
+    ports:
+    - "8501:8501"
+    extra_hosts:
+      - "localhost:host-gateway"
     environment:
       - API_URL=http://localhost:8080
       - HOSTNAME=0.0.0.0

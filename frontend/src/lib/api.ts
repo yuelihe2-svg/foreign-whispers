@@ -6,6 +6,8 @@ import type {
   StitchResponse,
 } from "./types";
 
+import { DiarizeResponse } from "./types";
+
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -88,4 +90,12 @@ export function getCaptionsUrl(videoId: string): string {
 
 export function getOriginalCaptionsUrl(videoId: string): string {
   return `/api/captions/${videoId}/original`;
+}
+
+// Task 4.1: Call the backend diarization endpoint
+// 任务 4.1：调用后端的声纹识别接口
+export async function diarizeVideo(videoId: string): Promise<DiarizeResponse> {
+  return fetchJson<DiarizeResponse>(`/api/diarize/${videoId}`, {
+    method: "POST",
+  });
 }

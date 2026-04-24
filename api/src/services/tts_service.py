@@ -17,9 +17,24 @@ class TTSService:
         self.ui_dir = ui_dir
         self.tts_engine = tts_engine
 
-    def text_file_to_speech(self, source_path: str, output_path: str, *, alignment: bool | None = None) -> None:
+    def text_file_to_speech(
+        self, 
+        source_path: str, 
+        output_path: str, 
+        *, 
+        alignment: bool | None = None,
+        speaker_mapping: dict[str, str] | None = None
+    ) -> None:
         """Generate time-aligned TTS audio from a translated JSON transcript."""
-        tts_text_file_to_speech(source_path, output_path, self.tts_engine, alignment=alignment)
+        # [EN] Pass the mapped voices dictionary down to the core TTS engine
+        # [ZH] 将建立好的说话人映射字典向下传递给核心 TTS 引擎
+        tts_text_file_to_speech(
+            source_path, 
+            output_path, 
+            self.tts_engine, 
+            alignment=alignment,
+            speaker_mapping=speaker_mapping
+        )
 
     @staticmethod
     def title_for_video_id(video_id: str, search_dir: pathlib.Path) -> str | None:

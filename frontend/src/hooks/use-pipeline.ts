@@ -17,10 +17,12 @@ import {
   stitchVideo,
 } from "@/lib/api";
 import { computeConfigEntries, type ConfigEntry } from "@/lib/config-id";
+import { diarizeVideo } from "../lib/api";
 
 const STAGES: PipelineStage[] = [
   "download",
   "transcribe",
+  "diarize",
   "translate",
   "tts",
   "stitch",
@@ -192,6 +194,13 @@ export function usePipeline() {
     try {
       const dl = await run("download", () => downloadVideo(video.url));
       await run("transcribe", () => transcribeVideo(dl.video_id, settings.useYoutubeCaptions));
+      
+      // Task 4.3: Run diarization between transcription and translation
+      // 任务 4.3：在语音转文字和翻译之间，插入声纹识别流水线
+      if (settings.diarization.length > 0) {
+        await run("diarize", () => diarizeVideo(dl.video_id));
+      }
+      
       await run("translate", () => translateVideo(dl.video_id, "es"));
 
       // Run TTS + stitch for each config entry.

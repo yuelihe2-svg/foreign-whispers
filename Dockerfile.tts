@@ -1,0 +1,9 @@
+FROM travisvn/chatterbox-tts-api:latest
+USER root
+
+# 1. 安装 curl，并使用官方脚本强制向被阉割的虚拟环境注入 pip
+RUN apt-get update && apt-get install -y curl && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3
+
+# 2. 安装适配 RTX 50 系新架构的 CUDA 12.4 版本 PyTorch (自带 1000 秒防超时设定)
+RUN python3 -m pip install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124 --upgrade --default-timeout=1000

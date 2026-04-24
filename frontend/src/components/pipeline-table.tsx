@@ -1,6 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
+import { UsersIcon } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -28,6 +29,9 @@ const STAGES: {
 }[] = [
   { key: "download", label: "Download", icon: DownloadIcon, description: "Fetch video + captions from YouTube" },
   { key: "transcribe", label: "Transcribe", icon: MicIcon, description: "Speech-to-text via Whisper" },
+  // Task 4.4: Add diarize stage to the UI table
+  // 任务 4.4：将声纹识别阶段添加到界面表格中
+  { key: "diarize", label: "Diarize", icon: UsersIcon, description: "Speaker diarization via pyannote" },
   { key: "translate", label: "Translate", icon: LanguagesIcon, description: "English to Spanish translation" },
   { key: "tts", label: "TTS", icon: Volume2Icon, description: "Text-to-speech synthesis" },
   { key: "stitch", label: "Stitch", icon: ScissorsIcon, description: "Combine audio + video + subtitles" },

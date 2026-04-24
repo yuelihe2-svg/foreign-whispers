@@ -43,3 +43,62 @@ def diarize_audio(audio_path: str, hf_token: str | None = None) -> list[dict]:
     except Exception as exc:
         logger.warning("Diarization failed for %s: %s", audio_path, exc)
         return []
+    
+def assign_speakers(
+    segments: list[dict],
+    diarization: list[dict],
+) -> list[dict]:
+    """Assign a speaker label to each transcription segment.
+
+    For each segment, finds the diarization interval with the greatest
+    temporal overlap and copies its speaker label. If diarization is
+    empty, all segments default to ``SPEAKER_00``.
+
+    Args:
+        segments: Whisper-style ``[{id, start, end, text, ...}]``.
+        diarization: pyannote-style ``[{start_s, end_s, speaker}]``.
+
+    Returns:
+        New list of segment dicts, each with an added ``speaker`` key.
+        Original list is not mutated.
+    """
+    # Initialize the list for the output segments
+    # 初始化用于存放输出片段的列表
+    merged_segments = []
+
+    for t_seg in segments:
+        # Get start and end times for the text segment
+        # 获取字幕片段的起止时间
+        t_start = t_seg["start"]
+        t_end = t_seg.get("end", t_start + 1.0)
+        
+        # Default to SPEAKER_00 if no overlap is found or diarization is empty
+        # 如果没有找到重叠部分或声纹列表为空，默认分配为 SPEAKER_00
+        best_speaker = "SPEAKER_00" 
+        max_overlap = 0.0
+
+        # Compare with every diarization segment to find the max overlap
+        # 与每一个声纹片段进行对比，寻找重叠时间最长的说话人
+        for d_seg in diarization:
+            d_start = d_seg["start_s"]
+            d_end = d_seg["end_s"]
+
+            # Calculate intersection window (overlap duration)
+            # 计算两个时间段的交集（重叠时长）
+            overlap_start = max(t_start, d_start)
+            overlap_end = min(t_end, d_end)
+            overlap_duration = max(0.0, overlap_end - overlap_start)
+
+            # Update best speaker if this overlap is the largest so far
+            # 如果当前重叠时长大于历史最大值，则更新最佳说话人
+            if overlap_duration > max_overlap:
+                max_overlap = overlap_duration
+                best_speaker = d_seg["speaker"]
+
+        # Create a shallow copy of the segment and inject the speaker field
+        # 浅拷贝原有的字幕字典并注入 speaker 字段，以避免修改原始输入
+        new_seg = dict(t_seg)
+        new_seg["speaker"] = best_speaker
+        merged_segments.append(new_seg)
+
+    return merged_segments

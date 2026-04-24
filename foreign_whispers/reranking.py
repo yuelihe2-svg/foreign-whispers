@@ -104,63 +104,83 @@ def get_shorter_translations(
     context_next: str = "",
 ) -> list[TranslationCandidate]:
     """Return shorter translation candidates that fit *target_duration_s*.
-
-    .. admonition:: Student Assignment — Duration-Aware Translation Re-ranking
-
-       This function is intentionally a **stub that returns an empty list**.
-       Your task is to implement a strategy that produces shorter
-       target-language translations when the baseline translation is too long
-       for the time budget.
-
-       **Inputs**
-
-       ============== ======== ==================================================
-       Parameter      Type     Description
-       ============== ======== ==================================================
-       source_text    str      Original source-language segment text
-       baseline_es    str      Baseline target-language translation (from argostranslate)
-       target_duration_s float Time budget in seconds for this segment
-       context_prev   str      Text of the preceding segment (for coherence)
-       context_next   str      Text of the following segment (for coherence)
-       ============== ======== ==================================================
-
-       **Outputs**
-
-       A list of ``TranslationCandidate`` objects, sorted shortest first.
-       Each candidate has:
-
-       - ``text``: the shortened target-language translation
-       - ``char_count``: ``len(text)``
-       - ``brevity_rationale``: short note on what was changed
-
-       **Duration heuristic**: target-language TTS produces ~15 characters/second
-       (or ~4.5 syllables/second for Romance languages).  So a 3-second budget
-       ≈ 45 characters.
-
-       **Approaches to consider** (pick one or combine):
-
-       1. **Rule-based shortening** — strip filler words, use shorter synonyms
-          from a lookup table, contract common phrases
-          (e.g. "en este momento" → "ahora").
-       2. **Multiple translation backends** — call argostranslate with
-          paraphrased input, or use a second translation model, then pick
-          the shortest output that preserves meaning.
-       3. **LLM re-ranking** — use an LLM (e.g. via an API) to generate
-          condensed alternatives.  This was the previous approach but adds
-          latency, cost, and a runtime dependency.
-       4. **Hybrid** — rule-based first, fall back to LLM only for segments
-          that still exceed the budget.
-
-       **Evaluation criteria**: the caller selects the candidate whose
-       ``len(text) / 15.0`` is closest to ``target_duration_s``.
-
-    Returns:
-        Empty list (stub).  Implement to return ``TranslationCandidate`` items.
+    
+    Implementation: Rule-based approach (基于规则的实现)
+    Uses multi-stage text reduction to fit within the target duration budget.
+    通过多级文本精简，使翻译结果符合目标时长预算。
     """
     logger.info(
-        "get_shorter_translations called for %.1fs budget (%d chars baseline) — "
-        "returning empty list (student assignment stub).",
+        "get_shorter_translations called for %.1fs budget (%d chars baseline)",
         target_duration_s,
         len(baseline_es),
     )
-    return []
+
+    candidates = []
+    
+    # Heuristic: ~15 chars per second for Spanish
+    # 启发式规则：西班牙语的语速大约是每秒 15 个字符
+    target_char_count = int(target_duration_s * 15.0)
+    
+    # Stage 1: Remove common fillers and hesitations
+    # 第一阶段：去除常见的口语化语气词和停顿词
+    fillers = ["bueno, ", "sabes, ", "pues, ", "eh, ", "um, ", "quiero decir, "]
+    text_no_fillers = baseline_es
+    for filler in fillers:
+        # Case-insensitive removal (忽略大小写进行移除)
+        text_no_fillers = text_no_fillers.replace(filler, "").replace(filler.capitalize(), "")
+        
+    if text_no_fillers != baseline_es:
+        candidates.append(TranslationCandidate(
+            text=text_no_fillers,
+            char_count=len(text_no_fillers),
+            brevity_rationale="Removed filler words"
+        ))
+
+    # Stage 2: Replace long phrases with shorter synonyms
+    # 第二阶段：将冗长的短语替换为简短的同义词
+    replacements = {
+        "en este momento": "ahora",         # at this moment -> now
+        "en este punto": "ahora",           # at this point -> now
+        "por supuesto": "claro",            # of course -> sure
+        "sin embargo": "pero",              # however -> but
+        "es necesario que": "hay que",      # it is necessary to -> must
+        "con el fin de": "para",            # in order to -> for
+        "de acuerdo con": "según",          # according to -> per
+        "a pesar de que": "aunque",         # despite the fact that -> although
+        "por lo tanto": "así",              # therefore -> so
+        "en la mayoría de los casos": "generalmente", # in most cases -> generally
+        "yo creo que": "creo que",          # I believe that -> believe that (drop pronoun)
+        "yo pienso que": "pienso que"       # I think that -> think that
+    }
+    
+    text_replaced = text_no_fillers
+    for old, new in replacements.items():
+        text_replaced = text_replaced.replace(old, new).replace(old.capitalize(), new.capitalize())
+        
+    if text_replaced != text_no_fillers:
+        candidates.append(TranslationCandidate(
+            text=text_replaced,
+            char_count=len(text_replaced),
+            brevity_rationale="Replaced long phrases with shorter synonyms"
+        ))
+
+    # Stage 3: Aggressive modifier removal (Only if still too long)
+    # 第三阶段：激进的修饰语删除（仅当文本仍然过长时应用）
+    if len(text_replaced) > target_char_count + 5: # 5 char buffer (容错缓冲)
+        text_aggressive = text_replaced
+        adverbs_to_remove = ["muy ", "realmente ", "simplemente ", "absolutamente "]
+        for adv in adverbs_to_remove:
+            text_aggressive = text_aggressive.replace(adv, "")
+            
+        if text_aggressive != text_replaced and len(text_aggressive) > 0:
+            candidates.append(TranslationCandidate(
+                text=text_aggressive,
+                char_count=len(text_aggressive),
+                brevity_rationale="Aggressively removed non-essential adverbs"
+            ))
+
+    # Sort candidates by length (shortest first)
+    # 将所有生成的候选翻译按字符长度从小到大排序
+    candidates.sort(key=lambda c: c.char_count)
+
+    return candidates
