@@ -1,12 +1,12 @@
-### Algo 1 with the existing 
+### Algo 1 with the existing
 # Loop over each json element
 # read the time stamp and slice the audio/.wav file at the time stamps
-# attach the audio to the video 
+# attach the audio to the video
 # also the captions
 
 
 ### Algo 2
-## Loop over each json element 
+## Loop over each json element
 # Use TTS to conver the audiio
 # Save the audio file in sequence
 # Final func: Stitch the audio and captions
@@ -60,7 +60,9 @@ if _im_bin:
 def stitch_audio(video_path: str, audio_path: str, output_path: str):
     """Replace video audio track with the dubbed audio using ffmpeg remux.
 
-    Uses -c:v copy to avoid re-encoding video frames — instant and lossless.
+    Uses -c:v copy to avoid re-encoding video frames. The audio is explicitly
+    encoded at a sane bitrate/sample rate so speech does not collapse to a
+    very low-bitrate AAC stream.
     """
     import subprocess
 
@@ -71,12 +73,17 @@ def stitch_audio(video_path: str, audio_path: str, output_path: str):
         "ffmpeg", "-y",
         "-i", video_path,
         "-i", audio_path,
-        "-c:v", "copy",        # copy video stream without re-encoding
         "-map", "0:v:0",       # take video from first input
-        "-map", "1:a:0",       # take audio from second input
-        "-shortest",           # stop when shortest stream ends
+        "-map", "1:a:0",       # take dubbed audio from second input
+        "-c:v", "copy",        # copy video without re-encoding
+        "-c:a", "aac",         # encode audio explicitly as AAC
+        "-b:a", "192k",        # avoid low-bitrate distorted speech
+        "-ar", "48000",        # standard video audio sample rate
+        "-ac", "2",            # stereo improves player compatibility
+        "-movflags", "+faststart",
         output_path,
     ]
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr}")
@@ -99,7 +106,7 @@ def stitch_video_with_timestamps(video_path, caption_path, audio_path, output_pa
     subtitles = []
     with open(caption_path, 'r') as caption_file:
         # lines = caption_file.readlines()
-        # Read the json : for segments, 
+        # Read the json : for segments,
         # Loop over each segment , read the :
         #  - start time
         #  - end time
@@ -124,11 +131,9 @@ def stitch_video_with_timestamps(video_path, caption_path, audio_path, output_pa
     # Overlay each TextClip directly — they already have start/end/pos set
     video_with_subtitles = CompositeVideoClip([video_clip] + text_clips)
 
-    # Create a composite audio clip with both video and additional audio
-    final_audio_clip = CompositeAudioClip([video_with_subtitles.audio, audio_clip])
+    # Replace the original audio with dubbed audio instead of mixing both tracks.
 
-    # Set audio for the combined video
-    video_with_audio = video_with_subtitles.set_audio(final_audio_clip)
+    video_with_audio = video_with_subtitles.set_audio(audio_clip)
 
     # Write the final video — try GPU encoding, fall back to CPU
     codec = "libx264"
@@ -142,7 +147,13 @@ def stitch_video_with_timestamps(video_path, caption_path, audio_path, output_pa
                 codec = "h264_nvenc"
         except Exception:
             pass
-    video_with_audio.write_videofile(output_path, codec=codec, audio_codec="aac")
+    video_with_audio.write_videofile(
+        output_path,
+        codec=codec,
+        audio_codec="aac",
+        audio_bitrate="192k",
+        audio_fps=48000,
+    )
 
 if __name__ == "__main__":
     import sys

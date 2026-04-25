@@ -2,8 +2,10 @@
 
 import asyncio
 import functools
+import html
 import json
 import pathlib
+import textwrap
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
@@ -17,41 +19,101 @@ router = APIRouter(prefix="/api")
 _stitch_service = StitchService(ui_dir=settings.data_dir)
 
 
-def _segments_to_vtt(segments: list[dict]) -> str:
-    """Convert transcript segments to rolling two-line WebVTT format.
 
-    Mimics Google-style captions: each cue shows the current line on top
-    and the previous line on the bottom, creating a smooth reading bridge.
+def _wrap_caption_text(text: str, max_chars: int = 42, max_lines: int = 2) -> list[str]:
+    """Wrap one caption into at most two readable subtitle lines."""
+    words = text.strip().split()
+    if not words:
+        return []
+
+    lines: list[str] = []
+    current: list[str] = []
+
+    for word in words:
+        candidate = " ".join(current + [word])
+        if len(candidate) <= max_chars or not current:
+            current.append(word)
+            continue
+
+        lines.append(" ".join(current))
+        current = [word]
+
+        if len(lines) >= max_lines:
+            break
+
+    if current and len(lines) < max_lines:
+        lines.append(" ".join(current))
+
+    visible = " ".join(lines)
+    if len(visible) < len(text.strip()) and lines:
+        lines[-1] = lines[-1].rstrip(".,;:") + "..."
+
+    return lines[:max_lines]
+
+
+def _segments_to_vtt(segments: list[dict]) -> str:
+    """Convert transcript segments to WebVTT.
+
+    Each cue only shows the current subtitle text. Long captions are wrapped
+    into at most two lines. End times are clamped to the next cue start time
+    to prevent browsers from displaying overlapping subtitles.
     """
-    # Filter to non-empty segments first
-    segs = [s for s in segments if s.get("text", "").strip()]
+    segs = [
+        s for s in segments
+        if s.get("text", "").strip()
+        and "start" in s
+        and "end" in s
+    ]
+    segs = sorted(segs, key=lambda s: float(s["start"]))
+
     if not segs:
         return "WEBVTT\n"
 
     lines = ["WEBVTT", ""]
-    prev_text: str | None = None
-    for i, seg in enumerate(segs, 1):
-        start = _format_vtt_time(seg["start"])
-        end = _format_vtt_time(seg["end"])
-        text = seg.get("text", "").strip()
-        lines.append(str(i))
-        lines.append(f"{start} --> {end}")
-        if prev_text:
-            lines.append(f"{text}\n{prev_text}")
-        else:
-            lines.append(text)
+
+    for i, seg in enumerate(segs):
+        start_s = float(seg["start"])
+        raw_end_s = float(seg["end"])
+
+        next_start_s = None
+        if i + 1 < len(segs):
+            next_start_s = float(segs[i + 1]["start"])
+
+        end_s = raw_end_s
+        if next_start_s is not None and next_start_s > start_s:
+            end_s = min(raw_end_s, next_start_s)
+
+        if end_s <= start_s:
+            end_s = start_s + 0.5
+
+        lines.append(str(i + 1))
+        lines.append(f"{_format_vtt_time(start_s)} --> {_format_vtt_time(end_s)}")
+        lines.extend(_wrap_caption_text(seg.get("text", "").strip()))
         lines.append("")
-        prev_text = text
+
     return "\n".join(lines)
 
 
 def _format_vtt_time(seconds: float) -> str:
     """Format seconds as HH:MM:SS.mmm for WebVTT."""
+    seconds = max(0.0, float(seconds))
+
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:06.3f}"
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
 
+    if ms == 1000:
+        s += 1
+        ms = 0
+    if s == 60:
+        m += 1
+        s = 0
+    if m == 60:
+        h += 1
+        m = 0
+
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 def _serve_captions(vtt_dir: pathlib.Path, json_fallback_dir: pathlib.Path, video_id: str):
     """Serve VTT captions from disk. Falls back to generating from JSON if VTT doesn't exist yet."""
@@ -106,11 +168,78 @@ def _compute_speech_offset(title: str) -> float:
     return yt_start - whisper_start
 
 
+
+def _find_latest_tts_align_report(title: str):
+    """Find the newest TTS alignment report for a title."""
+    root = settings.data_dir / "tts_audio" / "chatterbox"
+    if not root.exists():
+        return None
+
+    candidates = []
+    for config_dir in root.iterdir():
+        if not config_dir.is_dir():
+            continue
+        candidate = config_dir / f"{title}.align.json"
+        if candidate.exists():
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _segments_to_vtt_from_tts_schedule(segments: list[dict], align_report: dict) -> str:
+    """Convert translated segments to VTT using the TTS assembly timeline."""
+    details = align_report.get("segments", [])
+
+    if not segments or not details or len(segments) != len(details):
+        return _segments_to_vtt(segments)
+
+    initial_offset_s = align_report.get("initial_offset_s")
+    if initial_offset_s is None:
+        initial_offset_s = segments[0].get("start", 0.0)
+
+    cursor = float(initial_offset_s)
+    lines = ["WEBVTT", ""]
+
+    for cue_no, detail in enumerate(details, start=1):
+        idx = int(detail.get("index", cue_no - 1))
+        if idx < 0 or idx >= len(segments):
+            continue
+
+        duration_s = (
+            detail.get("scheduled_duration_s")
+            or detail.get("target_sec")
+            or (
+                float(segments[idx].get("end", 0.0))
+                - float(segments[idx].get("start", 0.0))
+            )
+        )
+        duration_s = max(0.1, float(duration_s))
+
+        start_s = cursor
+        end_s = cursor + duration_s
+        cursor = end_s
+
+        text = segments[idx].get("text", "").strip()
+        if not text:
+            continue
+
+        lines.append(str(cue_no))
+        lines.append(f"{_format_vtt_time(start_s)} --> {_format_vtt_time(end_s)}")
+        lines.extend(_wrap_caption_text(text))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 @router.get("/captions/{video_id}")
 async def get_captions(video_id: str):
-    """Serve translated (target-language) captions as WebVTT.
+    """Serve translated target-language captions as WebVTT.
 
-    Applies the YouTube caption timing offset so subtitles start when speech begins.
+    If a TTS alignment report exists, generate captions from the dubbed TTS
+    timeline so subtitles stay synchronized with the assembled audio.
     """
     title = resolve_title(video_id)
     if title is None:
@@ -129,53 +258,68 @@ async def get_captions(video_id: str):
     data = json.loads(json_path.read_text())
     segments = data.get("segments", [])
 
-    # Apply timing offset from YouTube captions
-    offset = _compute_speech_offset(title)
-    if offset > 0:
-        segments = [
-            {**seg, "start": seg["start"] + offset, "end": seg["end"] + offset}
-            for seg in segments
-        ]
+    align_path = _find_latest_tts_align_report(title)
+    if align_path is not None:
+        align_report = json.loads(align_path.read_text())
+        vtt = _segments_to_vtt_from_tts_schedule(segments, align_report)
+    else:
+        offset = _compute_speech_offset(title)
+        if offset > 0:
+            segments = [
+                {**seg, "start": seg["start"] + offset, "end": seg["end"] + offset}
+                for seg in segments
+            ]
+        vtt = _segments_to_vtt(segments)
 
-    vtt = _segments_to_vtt(segments)
     vtt_dir.mkdir(parents=True, exist_ok=True)
     vtt_path.write_text(vtt)
     return PlainTextResponse(vtt, media_type="text/vtt")
 
 
 def _youtube_captions_to_vtt(caption_path: pathlib.Path) -> str:
-    """Convert YouTube line-delimited JSON captions to rolling two-line WebVTT.
+    """Convert YouTube line-delimited JSON captions to WebVTT.
 
     YouTube format: {"text": "...", "start": float, "duration": float} per line.
-    Uses the same rolling bridge style as _segments_to_vtt.
+    Each cue only shows current text, wrapped to at most two lines. End times
+    are clamped to the next cue start time to avoid overlap.
     """
-    # Parse and filter valid segments first
     segs: list[tuple[float, float, str]] = []
+
     for line in caption_path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
+
         seg = json.loads(line)
         text = seg.get("text", "").strip()
-        start = seg.get("start", 0)
-        duration = seg.get("duration", 0)
+        start = float(seg.get("start", 0))
+        duration = float(seg.get("duration", 0))
+
         if text and duration > 0:
             segs.append((start, start + duration, text))
+
+    segs = sorted(segs, key=lambda x: x[0])
 
     if not segs:
         return "WEBVTT\n"
 
     lines_out = ["WEBVTT", ""]
-    prev_text: str | None = None
-    for i, (start, end, text) in enumerate(segs, 1):
-        lines_out.append(str(i))
+
+    for i, (start, raw_end, text) in enumerate(segs):
+        next_start = segs[i + 1][0] if i + 1 < len(segs) else None
+
+        end = raw_end
+        if next_start is not None and next_start > start:
+            end = min(raw_end, next_start)
+
+        if end <= start:
+            end = start + 0.5
+
+        lines_out.append(str(i + 1))
         lines_out.append(f"{_format_vtt_time(start)} --> {_format_vtt_time(end)}")
-        if prev_text:
-            lines_out.append(f"{text}\n{prev_text}")
-        else:
-            lines_out.append(text)
+        lines_out.extend(_wrap_caption_text(text))
         lines_out.append("")
-        prev_text = text
+
     return "\n".join(lines_out)
 
 

@@ -181,6 +181,64 @@ def segments_from_file(file_path) -> list[dict]:
         trans = json.load(file)
     return trans.get("segments", [])
 
+def _normalize_overlapping_segments_for_tts(
+    segments: list[dict],
+    *,
+    min_duration_s: float = 0.25,
+) -> list[dict]:
+    """Return non-overlapping segment timing for TTS synthesis.
+
+    Some caption sources use rolling or overlapping display windows. If we
+    synthesize every segment using its original display duration, the final WAV
+    can become much longer than the source video. For TTS, each segment should
+    occupy only the time until the next segment starts.
+
+    """
+    if not segments:
+        return []
+
+    normalized: list[dict] = []
+
+    for i, seg in enumerate(segments):
+        new_seg = dict(seg)
+
+        start = float(new_seg.get("start", 0.0))
+        end = float(new_seg.get("end", start))
+
+        if i + 1 < len(segments):
+            next_start = float(segments[i + 1].get("start", end))
+
+            # Clamp the display end to the next segment start when windows overlap.
+
+            if next_start > start and next_start < end:
+                end = next_start
+
+        # Keep a tiny positive duration so empty windows do not crash post-processing.
+
+        if end <= start:
+            end = start + min_duration_s
+
+        new_seg["start"] = start
+        new_seg["end"] = end
+        normalized.append(new_seg)
+
+    original_total = sum(
+        max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+        for seg in segments
+    )
+    normalized_total = sum(
+        max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+        for seg in normalized
+    )
+
+    print(
+        f"[tts] Normalized segment durations: "
+        f"original_total={original_total:.2f}s, "
+        f"normalized_total={normalized_total:.2f}s"
+    )
+
+    return normalized
+
 
 def files_from_dir(dir_path) -> list:
     SUFFIX = ".json"
@@ -206,7 +264,7 @@ def _synthesize_raw(
     if not text or not text.strip():
         return None
 
-    # 【新增防护机制】如果是备用的老模型，强行清空克隆音色，防止张量计算爆炸
+
     if not isinstance(tts_engine, ChatterboxClient):
         speaker_wav = None
 
@@ -287,16 +345,35 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
     return (segment_audio, speed_factor, raw_duration)
 
 
-def _synced_segment_audio(tts_engine, text: str, target_sec: float, work_dir, stretch_factor: float = 1.0, alignment_enabled: bool = True) -> tuple:
+def _synced_segment_audio(
+    tts_engine,
+    text: str,
+    target_sec: float,
+    work_dir,
+    stretch_factor: float = 1.0,
+    alignment_enabled: bool | None = None,
+) -> tuple:
     """Generate TTS audio for *text* and time-stretch it to *target_sec*.
 
     Convenience wrapper kept for callers that don't use the batch path.
+    If alignment_enabled is omitted, use the module-level FW_ALIGNMENT flag.
+
     """
     if target_sec <= 0:
         return (None, 0.0, 0.0)
+
+    if alignment_enabled is None:
+        alignment_enabled = _ALIGNMENT_ENABLED
+
     raw_wav = str(pathlib.Path(work_dir) / "raw_segment.wav")
     raw_bytes = _synthesize_raw(tts_engine, text, raw_wav)
-    return _postprocess_segment(raw_bytes, target_sec, stretch_factor, alignment_enabled, str(work_dir))
+    return _postprocess_segment(
+        raw_bytes,
+        target_sec,
+        stretch_factor,
+        alignment_enabled,
+        str(work_dir),
+    )
 
 
 def text_to_speech(text, output_file_path):
@@ -438,6 +515,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     print(f"generating {save_name}...", end="")
 
     segments = segments_from_file(source_path)
+    segments = _normalize_overlapping_segments_for_tts(segments)
 
     if not segments:
         text = text_from_file(source_path)
@@ -497,6 +575,53 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             "speaker": speaker,
             "speaker_wav": speaker_wav,
         })
+
+    # Unit tests and non-Chatterbox engines use the legacy sequential wrapper.
+    if not isinstance(engine, ChatterboxClient):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            combined = AudioSegment.empty()
+            cursor_ms = 0
+            segment_details = []
+
+            for m in seg_metas:
+                i = m["index"]
+                start_ms = int((m["start"] + offset) * 1000)
+
+                if start_ms > cursor_ms:
+                    combined += AudioSegment.silent(duration=start_ms - cursor_ms)
+                    cursor_ms = start_ms
+
+                seg_audio, seg_speed_factor, seg_raw_duration = _synced_segment_audio(
+                    engine,
+                    m["text"],
+                    m["target_sec"],
+                    tmpdir,
+                    m["stretch_factor"],
+                )
+
+                aligned_seg = m["aligned_seg"]
+                segment_details.append({
+                    "index": i,
+                    "text": m["text"],
+                    "target_sec": round(m["target_sec"], 3),
+                    "stretch_factor": round(m["stretch_factor"], 3),
+                    "raw_duration_s": round(seg_raw_duration, 3),
+                    "speed_factor": round(seg_speed_factor, 3),
+                    "action": aligned_seg.action.value if aligned_seg and hasattr(aligned_seg, "action") else "unknown",
+                })
+
+                if seg_audio is not None:
+                    combined += seg_audio
+                    cursor_ms += len(seg_audio)
+
+            save_path = pathlib.Path(output_path) / save_name
+            combined.export(str(save_path), format="wav")
+
+        stem = pathlib.Path(source_path).stem
+        _write_align_report(str(output_path), stem, _metrics_list, _aligned_list, segment_details)
+
+        print("success!")
+        return None
 
     # ── Phase 1: GPU synthesis (concurrent) ───────────────────────────
     # Submit all TTS calls to a thread pool so the GPU stays busy while

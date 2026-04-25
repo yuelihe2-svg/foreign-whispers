@@ -1,100 +1,171 @@
-"""POST /api/diarize/{video_id} — speaker diarization (issue fw-lua)."""
+"""POST /api/diarize/{video_id} — speaker diarization."""
+
+from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from api.src.core.config import settings
 from api.src.core.dependencies import resolve_title
-from api.src.schemas.diarize import DiarizeResponse
-from api.src.services.alignment_service import AlignmentService
-
-# assignment function finished in Task 1
 from foreign_whispers.diarization import assign_speakers
 
 router = APIRouter(prefix="/api")
 
-_alignment_service = AlignmentService(settings=settings)
+
+def _diarizations_dir() -> Path:
+    return getattr(settings, "diarizations_dir", settings.data_dir / "diarizations")
 
 
-@router.post("/diarize/{video_id}", response_model=DiarizeResponse)
+def _extract_audio(video_path: Path, wav_path: Path) -> None:
+    """Extract mono 16 kHz WAV audio for diarization."""
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if wav_path.exists() and wav_path.stat().st_size > 0:
+        return
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(wav_path),
+    ]
+
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _run_pyannote(wav_path: Path) -> list[dict]:
+    """Run pyannote speaker diarization and return serializable segments."""
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyannote.audio is not installed in the API container."
+        ) from exc
+
+    token = getattr(settings, "fw_hf_token", None) or os.environ.get("FW_HF_TOKEN")
+    if not token:
+        raise RuntimeError("FW_HF_TOKEN is required for pyannote diarization.")
+
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=token,
+    )
+
+    diarization = pipeline(str(wav_path))
+
+    segments: list[dict] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        segments.append(
+            {
+                "start_s": float(turn.start),
+                "end_s": float(turn.end),
+                "speaker": str(speaker),
+            }
+        )
+
+    return segments
+
+
+def _load_diarization_segments(path: Path) -> list[dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return data
+    return data.get("segments", [])
+
+
+def _merge_speakers_into_transcription(title: str, diarization_segments: list[dict]) -> int:
+    """Update Whisper transcription JSON with speaker labels when available."""
+    transcription_path = settings.transcriptions_dir / f"{title}.json"
+
+    if not transcription_path.exists():
+        return 0
+
+    data = json.loads(transcription_path.read_text(encoding="utf-8"))
+    segments = data.get("segments", [])
+
+    if not segments:
+        return 0
+
+    labeled_segments = assign_speakers(segments, diarization_segments)
+    data["segments"] = labeled_segments
+
+    transcription_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return sum("speaker" in segment for segment in labeled_segments)
+
+
+@router.post("/diarize/{video_id}")
 async def diarize_endpoint(video_id: str):
-    """Run speaker diarization on a video's audio track.
-
-    Steps:
-    1. Extract audio from video via ffmpeg
-    2. Run pyannote diarization
-    3. Cache and return speaker segments
-    """
+    """Run speaker diarization, cache the result, and merge speaker labels."""
     title = resolve_title(video_id)
     if title is None:
         raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
 
-    diar_dir = settings.diarizations_dir
-    diar_dir.mkdir(parents=True, exist_ok=True)
-    diar_path = diar_dir / f"{title}.json"
-
-    # Return cached result
-    if diar_path.exists():
-        data = json.loads(diar_path.read_text())
-        return DiarizeResponse(
-            video_id=video_id,
-            speakers=data.get("speakers", []),
-            segments=data.get("segments", []),
-            skipped=True,
+    video_path = settings.videos_dir / f"{title}.mp4"
+    if not video_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Downloaded video not found: {video_path.name}",
         )
 
-    # ---- YOUR CODE HERE ----
-    # Step 1: Extract audio from video via ffmpeg
-    # 第一阶段：使用 ffmpeg 从视频中提取 16kHz 单声道音频
-    video_path = settings.videos_dir / f"{title}.mp4"
-    audio_path = diar_dir / f"{title}.wav"
-    
-    if not audio_path.exists():
-        # -vn: no video, -acodec pcm_s16le: 16-bit PCM, -ar 16000: 16kHz sample rate
-        subprocess.run([
-            "ffmpeg", "-i", str(video_path), 
-            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", 
-            "-y", str(audio_path)
-        ], check=True, capture_output=True)
+    diar_dir = _diarizations_dir()
+    diar_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 2: Run diarization via AlignmentService
-    # 第二阶段：调用服务运行声纹识别
-    diar_segments = _alignment_service.diarize(str(audio_path))
+    wav_path = diar_dir / f"{title}.wav"
+    json_path = diar_dir / f"{title}.json"
 
-    # Step 3: Extract unique speakers
-    # 第三阶段：提取并排序不重复的说话人列表
-    speakers = sorted(list(set(s["speaker"] for s in diar_segments)))
+    skipped = json_path.exists()
 
-    # Step 4: Cache result to disk
-    # 第四阶段：将结果序列化并保存到缓存目录
-    result = {"speakers": speakers, "segments": diar_segments}
-    diar_path.write_text(json.dumps(result))
+    try:
+        await asyncio.to_thread(_extract_audio, video_path, wav_path)
 
-    # Task 3: Merge speaker labels into the transcription JSON.
-    # 任务 3：将说话人标签合并到 Whisper 生成的字幕 JSON 中。
-    transcript_path = settings.transcriptions_dir / "whisper" / f"{title}.json"
-    if transcript_path.exists():
-        transcript = json.loads(transcript_path.read_text())
-        
-        # Assign speakers to the transcription segments based on temporal overlap.
-        # 根据时间重叠度，为字幕片段分配对应的说话人。
-        labeled_segments = assign_speakers(transcript.get("segments", []), diar_segments)
-        transcript["segments"] = labeled_segments
-        
-        # Write the updated transcription (now containing speaker metadata) back to disk.
-        # 将更新后的字幕（现已包含说话人元数据）重新写回磁盘。
-        transcript_path.write_text(json.dumps(transcript))
+        if skipped:
+            diarization_segments = _load_diarization_segments(json_path)
+        else:
+            diarization_segments = await asyncio.to_thread(_run_pyannote, wav_path)
+            payload = {
+                "video_id": video_id,
+                "title": title,
+                "segments": diarization_segments,
+            }
+            json_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
-    # Step 5: Return standard response.
-    # 第五阶段：返回标准的响应对象。
-    return DiarizeResponse(
-        video_id=video_id, 
-        speakers=speakers, 
-        segments=diar_segments,
-        skipped=False
-    )
-    # ---- END YOUR CODE ----
+        merged_count = _merge_speakers_into_transcription(title, diarization_segments)
+        speakers = sorted({segment.get("speaker") for segment in diarization_segments if segment.get("speaker")})
 
+        return {
+            "video_id": video_id,
+            "title": title,
+            "status": "ok",
+            "speakers": speakers,
+            "diarization_segments": len(diarization_segments),
+            "merged_transcription_segments": merged_count,
+            "skipped": skipped,
+            "audio_path": str(wav_path),
+            "diarization_path": str(json_path),
+        }
+
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to extract audio for diarization: {exc.stderr.decode(errors='ignore')}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

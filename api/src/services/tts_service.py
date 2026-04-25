@@ -18,22 +18,25 @@ class TTSService:
         self.tts_engine = tts_engine
 
     def text_file_to_speech(
-        self, 
-        source_path: str, 
-        output_path: str, 
-        *, 
+        self,
+        source_path: str,
+        output_path: str,
+        *,
         alignment: bool | None = None,
         speaker_mapping: dict[str, str] | None = None
     ) -> None:
         """Generate time-aligned TTS audio from a translated JSON transcript."""
-        # [EN] Pass the mapped voices dictionary down to the core TTS engine
-        # [ZH] 将建立好的说话人映射字典向下传递给核心 TTS 引擎
+        # Keep backward compatibility with callers/tests that do not accept speaker_mapping.
+
+        kwargs = {"alignment": alignment}
+        if speaker_mapping:
+            kwargs["speaker_mapping"] = speaker_mapping
+
         tts_text_file_to_speech(
-            source_path, 
-            output_path, 
-            self.tts_engine, 
-            alignment=alignment,
-            speaker_mapping=speaker_mapping
+            source_path,
+            output_path,
+            self.tts_engine,
+            **kwargs,
         )
 
     @staticmethod

@@ -28,6 +28,28 @@ def resolve_speaker_wav(
     Returns:
         Relative path string for the Chatterbox container (e.g. "es/default.wav").
     """
-    # ---- YOUR CODE HERE ----
-    raise NotImplementedError("Implement this function")
-    # ---- END YOUR CODE ----
+    # Normalize inputs so callers can pass "ES" or "/.../speakers" safely.
+    speakers_dir = Path(speakers_dir)
+    lang = target_language.strip().lower()
+
+    candidates: list[Path] = []
+
+    if speaker_id:
+        # Speaker-specific reference voice, e.g. speakers/es/SPEAKER_00.wav.
+        candidates.append(speakers_dir / lang / f"{speaker_id}.wav")
+
+    # Language-level default reference voice, e.g. speakers/es/default.wav.
+    candidates.append(speakers_dir / lang / "default.wav")
+
+    # Global fallback reference voice, e.g. speakers/default.wav.
+    candidates.append(speakers_dir / "default.wav")
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            # Chatterbox expects a path relative to the mounted voices directory.
+            return candidate.relative_to(speakers_dir).as_posix()
+
+    # Fail loudly so missing voice assets are easy to diagnose.
+
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"No speaker WAV found. Searched: {searched}")

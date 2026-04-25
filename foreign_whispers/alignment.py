@@ -13,6 +13,7 @@ The module provides:
 
 No external dependencies — stdlib only.
 """
+
 import dataclasses
 import re
 import unicodedata
@@ -44,14 +45,11 @@ def _estimate_duration(text: str, language: str = "es") -> float:
     """
     Predict TTS duration using a syllable/word-based heuristic.
     Replaces the crude ~15 chars/s heuristic with a robust baseline.
-    使用基于音节/单词的启发式方法预测 TTS 时长。
-    替换原来粗糙的（约 15 字符/秒）启发式规则，提供一个稳健的基准。
     """
     if not text or not text.strip():
         return 0.0
 
     # Clean text: remove punctuation, keep only alphanumeric characters and spaces
-    # 清除标点符号，仅保留字母、数字和空格
     clean_text = re.sub(r'[^\w\s]', '', text)
     words = clean_text.split()
     word_count = len(words)
@@ -60,21 +58,17 @@ def _estimate_duration(text: str, language: str = "es") -> float:
         return 0.0
 
     # Estimate syllable count (by matching consecutive vowel combinations)
-    # 估算音节数（通过匹配连续的元音字母组合）
     syllable_count = len(re.findall(r'[aeiouyAEIOUYáéíóúÁÉÍÓÚüÜ]+', clean_text))
     
     # Fallback strategy: if the word is all consonants/acronyms, syllable count >= word count
-    # 保底策略：如果单词全是辅音/缩写，音节数至少等于单词数
     syllable_count = max(syllable_count, word_count)
 
     # Linear regression weight parameters (based on engine cold start, word gaps, and syllable duration)
-    # 线性回归权重参数 (基于引擎冷启动开销、词间停顿与音节发声时长)
     base_overhead_s = 0.45      
     time_per_word_s = 0.12      
     time_per_syllable_s = 0.18  
 
     # Calculate predicted duration
-    # 计算预测的总时长
     predicted_duration = base_overhead_s + (word_count * time_per_word_s) + (syllable_count * time_per_syllable_s)
 
     return round(predicted_duration, 3)
@@ -346,8 +340,6 @@ def global_align_dp(
     """
     Global alignment using Beam Search to beat the greedy left-to-right scheduler.
     Minimizes a combined penalty of time-stretching, cumulative drift, and translation shortening.
-    使用束搜索 (Beam Search) 进行全局对齐，击败贪心算法。
-    通过最小化时间拉伸、累积漂移和缩短翻译的综合惩罚值来寻找最优解。
     """
     def _silence_after(end_s: float) -> float:
         for r in silence_regions:
@@ -356,7 +348,6 @@ def global_align_dp(
         return 0.0
 
     #  Beam state: (cumulative_penalty, cumulative_drift, list_of_aligned_segments)
-    # 束搜索状态：(累计惩罚值, 累计时间漂移, 已对齐片段列表)
     beams = [(0.0, 0.0, [])]
 
     for m in metrics:
@@ -365,38 +356,33 @@ def global_align_dp(
 
         for current_penalty, current_drift, segments in beams:
             # Evaluate all possible actions for this state
-            # 评估当前状态下所有可能的决策动作
             possible_moves = []
             sf = m.predicted_stretch
 
-            # 1. ACCEPT (Natural fit / 自然贴合)
+            # 1. ACCEPT (Natural fit)
             if sf <= 1.1:
                 possible_moves.append((AlignAction.ACCEPT, 0.0, 1.0, 0.0))
             
-            # 2. MILD_STRETCH (Time stretch / 轻度拉伸)
+            # 2. MILD_STRETCH (Time stretch)
             if sf > 1.1 and sf <= 1.8:
                 stretch_val = min(sf, max_stretch)
-                # 拉伸越严重，惩罚越大
                 penalty = (stretch_val - 1.0) * 10  
                 possible_moves.append((AlignAction.MILD_STRETCH, 0.0, stretch_val, penalty))
             
-            # 3. GAP_SHIFT (Borrow silence / 借用静音间隙)
+            # 3. GAP_SHIFT (Borrow silence)
             if sf > 1.1 and avail_gap > 0:
                 shift_val = min(m.overflow_s, avail_gap)
-                # 惩罚时间漂移，防止蝴蝶效应
                 penalty = shift_val * 5  
                 possible_moves.append((AlignAction.GAP_SHIFT, shift_val, 1.0, penalty))
             
-            # 4. REQUEST_SHORTER (Shorten translation / 重写文本)
+            # 4. REQUEST_SHORTER (Shorten translation)
             if sf > 1.4:
-                # 重写文本会丢失原意，给予极高的惩罚值
                 possible_moves.append((AlignAction.REQUEST_SHORTER, 0.0, 1.0, 20.0)) 
 
             if not possible_moves:
                 possible_moves.append((AlignAction.FAIL, 0.0, 1.0, 100.0))
 
             # Branch out and calculate new state
-            # 派生新状态并计算时间轴
             for action, gap_shift, stretch, step_penalty in possible_moves:
                 sched_start = m.source_start + current_drift
                 sched_end = sched_start + m.source_duration_s + gap_shift
@@ -419,9 +405,7 @@ def global_align_dp(
                 ))
 
         # Keep top-K beams based on lowest penalty
-        # 保留惩罚值最低的 K 个分支
         beams = sorted(new_beams, key=lambda x: x[0])[:beam_width]
 
     # Return the segment list of the best beam
-    # 返回全局惩罚最小的最优路径
     return beams[0][2]

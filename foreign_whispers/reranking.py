@@ -104,10 +104,8 @@ def get_shorter_translations(
     context_next: str = "",
 ) -> list[TranslationCandidate]:
     """Return shorter translation candidates that fit *target_duration_s*.
-    
-    Implementation: Rule-based approach (基于规则的实现)
+    Implementation: Rule-based approach
     Uses multi-stage text reduction to fit within the target duration budget.
-    通过多级文本精简，使翻译结果符合目标时长预算。
     """
     logger.info(
         "get_shorter_translations called for %.1fs budget (%d chars baseline)",
@@ -116,19 +114,17 @@ def get_shorter_translations(
     )
 
     candidates = []
-    
+
     # Heuristic: ~15 chars per second for Spanish
-    # 启发式规则：西班牙语的语速大约是每秒 15 个字符
     target_char_count = int(target_duration_s * 15.0)
-    
+
     # Stage 1: Remove common fillers and hesitations
-    # 第一阶段：去除常见的口语化语气词和停顿词
     fillers = ["bueno, ", "sabes, ", "pues, ", "eh, ", "um, ", "quiero decir, "]
     text_no_fillers = baseline_es
     for filler in fillers:
-        # Case-insensitive removal (忽略大小写进行移除)
+        # Case-insensitive removal
         text_no_fillers = text_no_fillers.replace(filler, "").replace(filler.capitalize(), "")
-        
+
     if text_no_fillers != baseline_es:
         candidates.append(TranslationCandidate(
             text=text_no_fillers,
@@ -137,7 +133,6 @@ def get_shorter_translations(
         ))
 
     # Stage 2: Replace long phrases with shorter synonyms
-    # 第二阶段：将冗长的短语替换为简短的同义词
     replacements = {
         "en este momento": "ahora",         # at this moment -> now
         "en este punto": "ahora",           # at this point -> now
@@ -152,11 +147,11 @@ def get_shorter_translations(
         "yo creo que": "creo que",          # I believe that -> believe that (drop pronoun)
         "yo pienso que": "pienso que"       # I think that -> think that
     }
-    
+
     text_replaced = text_no_fillers
     for old, new in replacements.items():
         text_replaced = text_replaced.replace(old, new).replace(old.capitalize(), new.capitalize())
-        
+
     if text_replaced != text_no_fillers:
         candidates.append(TranslationCandidate(
             text=text_replaced,
@@ -165,13 +160,12 @@ def get_shorter_translations(
         ))
 
     # Stage 3: Aggressive modifier removal (Only if still too long)
-    # 第三阶段：激进的修饰语删除（仅当文本仍然过长时应用）
-    if len(text_replaced) > target_char_count + 5: # 5 char buffer (容错缓冲)
+    if len(text_replaced) > target_char_count + 5: # 5 char buffer
         text_aggressive = text_replaced
         adverbs_to_remove = ["muy ", "realmente ", "simplemente ", "absolutamente "]
         for adv in adverbs_to_remove:
             text_aggressive = text_aggressive.replace(adv, "")
-            
+
         if text_aggressive != text_replaced and len(text_aggressive) > 0:
             candidates.append(TranslationCandidate(
                 text=text_aggressive,
@@ -179,8 +173,37 @@ def get_shorter_translations(
                 brevity_rationale="Aggressively removed non-essential adverbs"
             ))
 
+    # Stage 4: Budget-aware word-boundary trimming as a final fallback.
+    has_fitting_candidate = any(c.char_count <= target_char_count for c in candidates)
+
+    if len(text_replaced) > target_char_count and not has_fitting_candidate:
+        max_chars = max(12, target_char_count)
+        trimmed_words = []
+        current = ""
+
+        for word in text_replaced.split():
+            candidate_text = f"{current} {word}".strip() if current else word
+
+            if len(candidate_text) > max_chars:
+                break
+
+            current = candidate_text
+            trimmed_words.append(word)
+
+        text_trimmed = " ".join(trimmed_words).strip()
+        text_trimmed = text_trimmed.rstrip(",;:")
+
+        # Only add a fallback if it is non-empty and meaningfully shorter.
+        if text_trimmed and len(text_trimmed) < len(baseline_es):
+            candidates.append(TranslationCandidate(
+                text=text_trimmed,
+                char_count=len(text_trimmed),
+                brevity_rationale="Trimmed to duration budget on word boundary"
+            ))
+
+
+
     # Sort candidates by length (shortest first)
-    # 将所有生成的候选翻译按字符长度从小到大排序
     candidates.sort(key=lambda c: c.char_count)
 
     return candidates

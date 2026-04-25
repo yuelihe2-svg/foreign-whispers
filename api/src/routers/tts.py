@@ -28,6 +28,7 @@ async def tts_endpoint(
     request: Request,
     config: str = Query(..., pattern=r"^c-[0-9a-f]{7}$"),
     alignment: bool = Query(False),
+    speaker_wav: str | None = Query(None),
 ):
     """Generate TTS audio for a translated transcript.
 
@@ -58,48 +59,63 @@ async def tts_endpoint(
 
     source_path = str(trans_dir / f"{title}.json")
 
-    # [EN] Task 5: Build speaker-to-voice mapping based on available reference WAVs.
-    # [ZH] 任务 5：根据可用的克隆音色库，构建“说话人 -> 音色”的派单映射表。
+    # Task 5: Build speaker-to-voice mapping based on available reference WAVs.
     speaker_mapping = {}
     source_file = Path(source_path)
-    if source_file.exists():
+
+    if speaker_wav:
+        # Explicit speaker_wav query parameter overrides automatic per-speaker mapping.
+        if source_file.exists():
+            transcript = json.loads(source_file.read_text())
+            speakers = {
+                seg.get("speaker", "SPEAKER_00")
+                for seg in transcript.get("segments", [])
+            }
+        else:
+            speakers = {"SPEAKER_00"}
+
+        for spk in speakers:
+            speaker_mapping[spk] = speaker_wav
+
+    elif source_file.exists():
+
         transcript = json.loads(source_file.read_text())
         lang = transcript.get("language", "es")
         
-        # [EN] Navigate to pipeline_data/speakers/{lang}
-        # [ZH] 导航到音色库目录（使用 .parent 退回上一级）
-        speakers_dir = settings.data_dir.parent / "speakers" / lang
+        # Navigate to pipeline_data/speakers/{lang}
+
+        speakers_dir = settings.speakers_dir / lang
         
         if speakers_dir.exists():
             available_voices = sorted(list(speakers_dir.glob("*.wav")))
             if available_voices:
-                # [EN] Extract unique speakers from the transcript segments
-                # [ZH] 提取剧本中所有出现过的不重复的角色
+                # Extract unique speakers from the transcript segments
+
                 speakers = set()
                 for seg in transcript.get("segments", []):
                     if "speaker" in seg:
                         speakers.add(seg["speaker"])
                 
-                # [EN] Apply Index-based Mapping strategy
-                # [ZH] 应用基于索引的轮询映射策略（你设计的策略）
+                # Apply Index-based Mapping strategy
+
                 for spk in sorted(list(speakers)):
                     if spk == "<NO SPEAKER>":
                         speaker_mapping[spk] = str(available_voices[0])
                     else:
                         try:
-                            # [EN] Parse 'SPEAKER_01' -> 1
-                            # [ZH] 解析数字，将 SPEAKER_01 转为整数 1
+                            # Parse 'SPEAKER_01' -> 1
+
                             spk_idx = int(spk.split("_")[-1])
                         except ValueError:
                             spk_idx = 0
                         
-                        # [EN] Round-robin assignment using modulo operator
-                        # [ZH] 使用取模运算进行轮询分配，防止越界
+                        # Round-robin assignment using modulo operator
+
                         assigned_voice = available_voices[spk_idx % len(available_voices)]
                         speaker_mapping[spk] = str(assigned_voice)
 
-    # [EN] Pass the constructed mapping to the TTS service
-    # [ZH] 将构建好的角色清单传递给下游配音服务
+    # Pass the constructed mapping to the TTS service
+
     await _run_in_threadpool(
         None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment, speaker_mapping=speaker_mapping
     )
