@@ -1,249 +1,475 @@
-# Foreign Whispers
+# Foreign Whispers Dubbing Pipeline
 
-[![License: AGPL-3.0 + Commons Clause](https://img.shields.io/badge/License-Source_Available-blue.svg)](./LICENSE)
 
-YouTube video dubbing pipeline — transcribe, translate, and dub 60 Minutes interviews into a target language.
+Foreign Whispers is an open-source video dubbing pipeline that takes an English YouTube video as input and produces a Spanish dubbed video as output. The system uses Whisper for speech transcription, pyannote for speaker diarization, Argos Translate for machine translation, Chatterbox TTS for local speech synthesis and voice cloning, and FFmpeg for final video/audio/caption stitching.
 
-## Architecture
 
-```mermaid
-flowchart LR
-    subgraph Input
-        YT[YouTube URL]
-    end
+This project is designed to run with local GPU resources and does not rely on paid proprietary dubbing APIs.
 
-    subgraph Pipeline
-        DL[Download<br/>yt-dlp]
-        TR[Transcribe<br/>Whisper]
-        TL[Translate<br/>argostranslate]
-        TTS[Synthesize Speech<br/>Chatterbox GPU]
-        ST[Render Dubbed Video<br/>ffmpeg remux]
-    end
 
-    subgraph Output
-        VID[Dubbed Video<br/>+ WebVTT captions]
-    end
+---
 
-    subgraph Stack
-        FE[Next.js Frontend<br/>:8501]
-        API[FastAPI Backend<br/>:8080]
-    end
+## 1. Project Overview
 
-    YT --> DL --> TR --> TL --> TTS --> ST --> VID
 
-    FE -- /api/* proxy --> API
-    API --> DL
+The goal of this project is to reproduce the main functionality of commercial AI dubbing systems using open-source components. Given a YouTube URL, the pipeline downloads the source video, extracts or generates captions, transcribes the audio, translates the transcript into Spanish, optionally assigns speaker labels, synthesizes Spanish speech with Chatterbox TTS, and stitches the dubbed audio and WebVTT captions back onto the original video.
 
-    classDef default fill:#37474f,color:#fff,stroke:#546e7a
-    classDef pipeline fill:#0277bd,color:#fff,stroke:#01579b
-    classDef stack fill:#00695c,color:#fff,stroke:#004d40
-    classDef io fill:#4527a0,color:#fff,stroke:#311b92
 
-    class YT,VID io
-    class DL,TR,TL,TTS,ST pipeline
-    class FE,API stack
-```
+The final output is a dubbed MP4 file with translated WebVTT captions that can be viewed in the Foreign Whispers Dubbing Studio frontend.
 
-## Quick Start
 
-Two profiles are available via Docker Compose:
+---
 
-```bash
-# NVIDIA GPU — Whisper + Chatterbox on dedicated GPU containers
-docker compose --profile nvidia up -d
+## 2. Main Features
 
-# CPU only — no GPU containers (STT/TTS must be provided externally)
-docker compose --profile cpu up -d
-```
 
-Open **http://localhost:8501** in your browser.
+- Download YouTube videos and caption files using `yt-dlp`.
+- Transcribe speech with Whisper.
+- Compare Whisper segments with YouTube captions.
+- Translate English transcript segments into Spanish using Argos Translate.
+- Generate shorter translation candidates for timing-constrained dubbing.
+- Run speaker diarization with pyannote and merge speaker labels into transcript segments.
+- Select speaker-specific reference voices for Chatterbox TTS.
+- Generate dubbed Spanish audio using local Chatterbox TTS.
+- Align or schedule subtitles to the generated TTS timeline.
+- Stitch the original video stream with dubbed audio and WebVTT captions using FFmpeg.
+- Demonstrate the full workflow in a Next.js frontend at `http://localhost:8501`.
 
-## Pipeline Stages
 
-| Stage | What it does | Output |
-|-------|-------------|--------|
-| **Download** | Fetch video + captions from YouTube via yt-dlp | `videos/`, `youtube_captions/` |
-| **Transcribe** | Speech-to-text via Whisper | `transcriptions/whisper/` |
-| **Translate** | Source → target language via argostranslate (offline, OpenNMT) | `translations/argos/` |
-| **Synthesize Speech** | TTS via Chatterbox (GPU) or Coqui (CPU fallback), time-aligned to original segments | `tts_audio/chatterbox/` |
-| **Render Dubbed Video** | Replace audio track via ffmpeg remux (no re-encoding) | `dubbed_videos/` |
+---
 
-Captions are served as WebVTT via the `<track>` element — no subtitle burn-in:
+## 3. System Architecture
 
-| Endpoint | Source | Output |
-|----------|--------|--------|
-| `GET /api/captions/{id}/original` | YouTube captions (generated on the fly) | — |
-| `GET /api/captions/{id}` | Translated segments + YouTube timing offset | `dubbed_captions/*.vtt` |
 
-## Project Structure
+The system is organized into four main layers:
 
-```
-foreign-whispers/
-├── api/src/                     # FastAPI backend (layered architecture)
-│   ├── main.py                  # App factory + lazy model loading
-│   ├── core/config.py           # Pydantic settings (FW_ env prefix)
-│   ├── routers/                 # Thin route handlers
-│   │   ├── download.py          # POST /api/download
-│   │   ├── transcribe.py        # POST /api/transcribe/{id}
-│   │   ├── translate.py         # POST /api/translate/{id}
-│   │   ├── tts.py               # POST /api/tts/{id}
-│   │   └── stitch.py            # POST /api/stitch/{id}, GET /api/video/*, /api/captions/*
-│   ├── services/                # Business logic (HTTP-agnostic)
-│   ├── schemas/                 # Pydantic request/response models
-│   └── inference/               # ML model backend abstraction
-├── frontend/                    # Next.js + shadcn/ui
-│   ├── src/components/          # Pipeline tracker, video player, result panels
-│   ├── src/hooks/use-pipeline.ts # State machine for pipeline orchestration
-│   └── src/lib/api.ts           # API client
-├── download_video.py            # yt-dlp wrapper
-├── transcribe.py                # Whisper wrapper
-├── translate_en_to_es.py        # argostranslate wrapper
-├── tts_es.py                    # Chatterbox client + time-aligned TTS generation
-├── translated_output.py         # ffmpeg audio remux + legacy subtitle compositing
-├── pipeline_data/               # All intermediate and output files (volume-mounted)
-│   └── api/
-│       ├── videos/              # Downloaded source MP4s
-│       ├── youtube_captions/    # Line-delimited JSON from yt-dlp
-│       ├── transcriptions/
-│       │   └── whisper/         # Whisper output JSON
-│       ├── translations/
-│       │   └── argos/           # argostranslate output JSON
-│       ├── tts_audio/
-│       │   └── chatterbox/       # TTS WAV files per config
-│       ├── dubbed_captions/     # Target-language VTT
-│       ├── dubbed_videos/       # Final dubbed MP4s per config
-│       └── speakers/            # Reference voice clips
-├── docker-compose.yml           # Profiles: nvidia, cpu, apple
-├── Dockerfile                   # Multi-stage: cpu and gpu targets
-└── docs/
-    └── dubbing-alignment-design.md  # TTS temporal alignment literature survey + design
-```
 
-## API Endpoints
+| Layer | Description | Runtime |
+|---|---|---|
+| Frontend | Next.js Dubbing Studio UI | Port `8501` |
+| API Orchestrator | FastAPI backend that coordinates pipeline stages | Port `8080` |
+| GPU Services | Whisper STT and Chatterbox TTS services | Ports `8000` and `8020` |
+| Python Library | Alignment, diarization helpers, reranking, and evaluation logic | Local Python package |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/download` | Download YouTube video + captions |
-| POST | `/api/transcribe/{id}` | Whisper speech-to-text |
-| POST | `/api/translate/{id}` | Source → target language translation |
-| POST | `/api/tts/{id}` | Time-aligned TTS synthesis |
-| POST | `/api/stitch/{id}` | Audio remux (ffmpeg -c:v copy) |
-| GET | `/api/video/{id}` | Stream dubbed video (range requests) |
-| GET | `/api/video/{id}/original` | Stream original video (range requests) |
-| GET | `/api/captions/{id}` | Translated WebVTT captions |
-| GET | `/api/captions/{id}/original` | Original English WebVTT captions |
-| GET | `/api/audio/{id}` | TTS audio (WAV) |
-| GET | `/healthz` | Health check |
 
-## Development
+The typical pipeline is:
 
-### Container architecture
+    YouTube URL
+      -> Download
+      -> Transcribe
+      -> Diarize
+      -> Translate
+      -> TTS
+      -> Stitch
+      -> Dubbed MP4 + WebVTT captions
 
-```
-Host machine
-├── foreign_whispers/      ← bind-mounted into API container
-├── api/                   ← bind-mounted into API container
-├── pipeline_data/api/     ← bind-mounted into API container
-│
-└── Docker Compose
-    ├── foreign-whispers-stt   (GPU)  :8000  — Whisper inference
-    ├── foreign-whispers-tts   (GPU)  :8020  — Chatterbox inference
-    ├── foreign-whispers-api   (CPU)  :8080  — FastAPI orchestrator
-    └── foreign-whispers-frontend      :8501  — Next.js UI
-```
 
-The API container is CPU-only — it delegates all GPU work to the STT and TTS
-containers via HTTP. The `foreign_whispers/` library and `api/` source are
-**bind-mounted** from the host, so edits on the host are immediately visible
-inside the container.
+---
 
-### Editing and debugging the library
+## 4. Repository Structure
 
-1. **Start all services:**
 
-   ```bash
-   docker compose --profile nvidia up -d
-   ```
+    api/
+      src/
+        routers/          FastAPI route handlers
+        services/         Backend service and engine logic
+        core/             Shared configuration and dependencies
 
-2. **Edit any file** in `foreign_whispers/` or `api/` on the host (e.g. in VS Code).
+    foreign_whispers/
+      alignment.py        Duration prediction and alignment logic
+      diarization.py      Speaker-label assignment logic
+      evaluation.py       Dubbing quality scorecard
+      reranking.py        Duration-aware translation candidates
+      voice_resolution.py Speaker reference voice fallback logic
 
-3. **Restart the API container** to pick up changes:
+    frontend/
+      src/                Next.js frontend source code
 
-   ```bash
-   docker compose --profile nvidia restart api
-   ```
+    notebooks/
+      pipeline_end_to_end/
+      download_integration/
+      transcription_integration/
+      translation_integration/
+      diarization_integration/
+      alignment_integration/
+      tts_integration/
+      stitch_integration/
 
-   To avoid manual restarts, add `--reload` to the uvicorn command in
-   `docker-compose.yml`:
+    pipeline_data/
+      api/                Cached runtime artifacts, generated locally
 
-   ```yaml
-   command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
-   ```
 
-   With `--reload`, uvicorn watches for file changes and restarts automatically.
+---
 
-4. **Test via the SDK** from a notebook or Python REPL on the host:
+## 5. Requirements
 
-   ```python
-   from foreign_whispers import FWClient
-   fw = FWClient()             # connects to http://localhost:8080
-   fw.transcribe("GYQ5yGV_-Oc")
-   ```
 
-5. **Test the library directly** (no Docker needed for pure-Python alignment work):
+The application is intended to run on a machine with NVIDIA GPU support and Docker installed.
 
-   ```python
-   from foreign_whispers import global_align, compute_segment_metrics, clip_evaluation_report
-   ```
 
-   This is the two-phase workflow:
-   - **Phase 1 (SDK):** Call `FWClient` methods to drive the pipeline through Docker (download, transcribe, translate, TTS, stitch). Data lands in `pipeline_data/api/`.
-   - **Phase 2 (library):** Import `foreign_whispers` directly to iterate on alignment algorithms using data produced in Phase 1. No GPU or Docker needed.
+Required tools:
 
-### Local setup (no Docker)
+- Docker and Docker Compose
+- NVIDIA Container Toolkit
+- Python environment with `uv`
+- Git
+- A HuggingFace token with access to `pyannote/speaker-diarization-3.1`
 
-```bash
-uv sync                    # install all dependencies
-uv run python -c "from foreign_whispers import FWClient; print('ok')"
-```
 
-For Jupyter/VS Code notebooks, register the kernel once:
+GPU notes:
 
-```bash
-uv pip install ipykernel
-uv run python -m ipykernel install --user --name foreign-whispers
-```
+- Whisper and Chatterbox TTS are GPU-oriented services.
+- Chatterbox TTS generation can be slow or unstable on small or old GPUs.
+- For the submitted demo artifacts, some heavy TTS generation was run on an HPC GPU machine and then copied back into `pipeline_data/api/`.
+- This HPC workflow is not a required code dependency. A sufficiently capable local NVIDIA GPU can run the same pipeline directly through Docker.
 
-Then select the **foreign-whispers** kernel in VS Code's kernel picker.
 
-### When to rebuild
+---
 
-| Change | Action needed |
-|--------|--------------|
-| Edit `foreign_whispers/*.py` or `api/**/*.py` | Restart API container (or use `--reload`) |
-| Edit `pyproject.toml` / add dependencies | `docker compose --profile nvidia build api && docker compose --profile nvidia up -d api` |
-| Edit `frontend/` | Frontend has its own hot-reload; no action needed |
-| Edit `docker-compose.yml` | `docker compose --profile nvidia up -d` (re-creates changed services) |
+## 6. Environment Setup
 
-### File ownership
 
-The API container runs as your host UID/GID (set in `.env`), so all files it
-creates in `pipeline_data/` are owned by you — not root. If you see permission
-errors on existing files, they were created by an older root-mode container:
+Create a `.env` file in the project root:
 
-```bash
-sudo chown -R $(id -u):$(id -g) pipeline_data/
-```
+    FW_HF_TOKEN=hf_your_token_here
+    LOGFIRE_TOKEN=your_logfire_token_optional
 
-### Frontend
 
-```bash
-cd frontend && pnpm install && pnpm dev
-```
+Before running diarization, make sure the HuggingFace account has accepted the license for `pyannote/speaker-diarization-3.1`.
 
-### Requirements
 
-- Python 3.11
-- ffmpeg (system-wide)
-- deno (for yt-dlp YouTube extraction)
-- NVIDIA GPU recommended for Whisper + Chatterbox inference
+Install the local Python package:
+
+    uv sync
+
+
+---
+
+## 7. Running the Docker Stack
+
+
+Start the full stack with NVIDIA GPU support:
+
+    docker compose --profile nvidia up -d
+
+
+Check the API health endpoint:
+
+    curl http://localhost:8080/healthz
+
+Expected response:
+
+    {"status":"ok"}
+
+
+Open the frontend:
+
+    http://localhost:8501
+
+
+---
+
+## 8. Running the Pipeline from the Frontend
+
+
+After the Docker stack is running, open the frontend at:
+
+    http://localhost:8501
+
+
+The frontend lets the user select or submit a video and run the pipeline stages:
+
+1. Download
+2. Transcribe
+3. Diarize
+4. Translate
+5. TTS
+6. Stitch
+
+
+For cached videos, rerunning the pipeline is faster because intermediate artifacts are reused from `pipeline_data/api/`.
+
+
+The final dubbed video can be played directly in the frontend with translated captions.
+
+
+---
+
+## 9. Running the Integration Notebooks
+
+
+The project includes integration notebooks for the end-to-end workflow and for each individual pipeline stage:
+
+    notebooks/pipeline_end_to_end/pipeline_end_to_end.ipynb
+    notebooks/download_integration/download_integration.ipynb
+    notebooks/transcription_integration/transcription_integration.ipynb
+    notebooks/translation_integration/translation_integration.ipynb
+    notebooks/diarization_integration/diarization_integration.ipynb
+    notebooks/alignment_integration/alignment_integration.ipynb
+    notebooks/tts_integration/tts_integration.ipynb
+    notebooks/stitch_integration/stitch_integration.ipynb
+
+
+To execute a notebook from the command line:
+
+    python -m jupyter nbconvert \
+      --to notebook \
+      --execute \
+      --inplace \
+      --ExecutePreprocessor.timeout=1800 \
+      notebooks/pipeline_end_to_end/pipeline_end_to_end.ipynb
+
+
+The notebooks document and verify the major tasks:
+
+- Download artifact inspection
+- YouTube captions vs Whisper transcription comparison
+- Duration-aware translation reranking
+- Speaker diarization and speaker-label merging
+- Improved duration prediction and global alignment
+- Dubbing quality scorecard
+- Speaker-aware Chatterbox TTS
+- FFmpeg stitching and WebVTT caption generation
+
+
+---
+
+## 10. Output Artifacts
+
+
+Runtime artifacts are stored under:
+
+    pipeline_data/api/
+
+
+Important output locations:
+
+    pipeline_data/api/videos/
+    pipeline_data/api/youtube_captions/
+    pipeline_data/api/transcriptions/whisper/
+    pipeline_data/api/diarizations/
+    pipeline_data/api/translations/argos/
+    pipeline_data/api/tts_audio/chatterbox/
+    pipeline_data/api/dubbed_videos/
+    pipeline_data/api/dubbed_captions/
+
+
+The final dubbed videos are stored in:
+
+    pipeline_data/api/dubbed_videos/{config}/
+
+
+The translated WebVTT captions are stored in:
+
+    pipeline_data/api/dubbed_captions/
+
+
+Large runtime artifacts such as MP4 and WAV files are not intended to be committed to Git. They can be shared separately as sample input/output artifacts.
+
+
+---
+
+## 11. Implemented Technical Tasks
+
+
+This project implements the required notebook tasks and several integration fixes.
+
+
+### 11.1 Duration-Aware Translation Reranking
+
+
+`foreign_whispers/reranking.py` implements `get_shorter_translations()`, which generates shorter Spanish candidates when a translated segment is too long for the available TTS time budget.
+
+
+The implementation uses rule-based simplification, filler removal, phrase shortening, and fallback truncation at word boundaries. This is a lightweight local approach that does not require a paid LLM or external translation API.
+
+
+### 11.2 Speaker Diarization
+
+
+`foreign_whispers/diarization.py` implements `assign_speakers()`, which assigns speaker labels to transcript segments using maximum temporal overlap with pyannote diarization segments.
+
+
+The API endpoint `POST /api/diarize/{video_id}` extracts audio, runs or loads cached pyannote diarization, writes diarization JSON, and merges speaker labels back into the Whisper transcription JSON.
+
+
+### 11.3 Alignment and Evaluation
+
+
+`foreign_whispers/alignment.py` improves TTS duration prediction and implements a global alignment strategy for choosing between natural fit, stretching, gap shifting, and shorter-translation requests.
+
+
+`foreign_whispers/evaluation.py` implements a dubbing scorecard that combines timing accuracy, stretch risk, intelligibility proxy, semantic fidelity risk, and overall quality.
+
+
+### 11.4 Speaker-Aware TTS
+
+
+`foreign_whispers/voice_resolution.py` implements speaker reference voice resolution with a fallback chain:
+
+    speaker-specific voice
+      -> language default voice
+      -> global default voice
+
+
+The TTS API supports explicit `speaker_wav` selection and automatic per-speaker voice mapping when speaker labels are available.
+
+
+### 11.5 TTS-Scheduled Captions
+
+
+The stitch stage serves translated WebVTT captions synchronized to the assembled TTS timeline. Each cue shows only the current subtitle and is wrapped to at most two lines.
+
+
+This avoids the earlier problem where captions could overlap or show the previous subtitle line below the current subtitle.
+
+
+---
+
+## 12. Demo Videos
+
+
+The completed demo uses the following videos:
+
+    1. Rob Reiner: The 60 Minutes Interview
+    2. Strait of Hormuz disruption threatens to shake global economy
+    3. Alysa Liu: The 60 Minutes Interview
+
+
+The recommended primary demo video is:
+
+    Rob Reiner: The 60 Minutes Interview
+
+
+The Military Drones video was not used as the submitted demo because it contains more than 1300 translated segments and is computationally expensive to synthesize with Chatterbox TTS. The same pipeline supports it, but the final demo focuses on shorter completed clips for reproducibility.
+
+
+---
+
+## 13. Sample Input and Output
+
+
+Sample input:
+
+    YouTube URL for Rob Reiner: The 60 Minutes Interview
+
+
+Sample output:
+
+    pipeline_data/api/dubbed_videos/c-e5604bc/Rob Reiner: The 60 Minutes Interview.mp4
+
+
+The output video preserves the original video stream, replaces the original audio with generated Spanish TTS audio, and serves translated WebVTT captions through the API/frontend.
+
+
+---
+
+## 14. Reproducing Heavy TTS Generation
+
+
+The submitted code can run the full pipeline through the local Docker stack when the machine has a compatible NVIDIA GPU. In my submitted demo, the heaviest Chatterbox TTS generation jobs were run on an HPC GPU machine to improve stability and reduce waiting time. The generated WAV artifacts were then copied back into the project’s `pipeline_data/api/tts_audio/chatterbox/` directory and stitched locally.
+
+
+This HPC step is not required by the application design. It is an optional acceleration workflow for long or unstable TTS runs. A machine with a sufficiently capable NVIDIA GPU can run the same TTS stage directly through the Chatterbox service on port `8020`.
+
+
+For very long videos, segment-level caching is important. If a TTS run fails halfway, completed artifacts can be reused, and failed segments can be regenerated instead of restarting the entire pipeline.
+
+
+---
+
+## 15. Known Limitations
+
+
+- Long videos with hundreds or thousands of short segments are expensive to synthesize with Chatterbox TTS.
+- Chatterbox may occasionally fail during long continuous generation runs, so cached segment-level generation and repair workflows are useful.
+- Very dense speech may require shortening translated text or relaxing the TTS schedule to avoid unnatural speed-up.
+- The current duration-aware reranking is rule-based and can be improved with stronger semantic preservation methods.
+- Speaker diarization quality depends on pyannote output and clean source audio.
+- Voice cloning quality depends on the quality and cleanliness of reference WAV samples.
+
+
+---
+
+## 16. Reproducibility Notes
+
+
+All major pipeline artifacts are cached under `pipeline_data/api/`. If an artifact already exists, the corresponding stage can reuse it instead of recomputing from scratch. This makes repeated frontend demos faster and more stable.
+
+
+For a clean rerun, remove the relevant cached files under `pipeline_data/api/` and run the pipeline again from the frontend or notebooks.
+
+
+---
+
+## 17. Quick Start
+
+
+    # 1. Clone the repository
+    git clone https://github.com/yuelihe2-svg/foreign-whispers.git
+    cd foreign-whispers
+
+    # 2. Configure environment variables
+    cat > .env <<'EOF'
+    FW_HF_TOKEN=hf_your_token_here
+    EOF
+
+    # 3. Install Python dependencies
+    uv sync
+
+    # 4. Start the Docker stack
+    docker compose --profile nvidia up -d
+
+    # 5. Check API health
+    curl http://localhost:8080/healthz
+
+    # 6. Open the frontend
+    # http://localhost:8501
+
+
+---
+
+## 18. Final Submission Materials
+
+
+This submission includes:
+
+1. The GitHub codebase with completed pipeline integration.
+2. This README explaining how to run the application.
+3. A technical report describing the architecture and implementation details.
+4. A screen recording demo of the frontend application.
+5. A sample dubbed output video generated by the pipeline.
+
+
+---
+
+## 19. Suggested Demo Flow
+
+
+For the screen-recorded demo, the recommended flow is:
+
+1. Start the Docker stack.
+2. Open `http://localhost:8501`.
+3. Select the Rob Reiner demo video.
+4. Run or show the cached pipeline stages.
+5. Confirm that Download, Transcribe, Diarize, Translate, TTS, and Stitch complete successfully.
+6. Play the final dubbed video in the frontend.
+7. Enable or show translated captions.
+8. Briefly show another completed example, such as the Strait of Hormuz clip or the Alysa Liu clip.
+
+
+The Rob Reiner clip is recommended as the primary demo because it has stable audio quality and clear frontend playback.
+
+
+---
+
+## 20. Notes for Evaluators
+
+
+The codebase implements the complete open-source dubbing pipeline. The repository itself does not include large generated MP4 or WAV artifacts, because those files are too large for normal Git version control. They should be submitted separately as sample input/output artifacts.
+
+
+If the evaluator wants to regenerate outputs from scratch, the machine should have a working NVIDIA Docker setup and enough GPU memory for Whisper, pyannote, and Chatterbox TTS. If cached artifacts are provided, the frontend can demonstrate the final stitched outputs much faster.
+
+
+The notebooks have been executed successfully and document the implementation and verification process for each stage of the pipeline.
