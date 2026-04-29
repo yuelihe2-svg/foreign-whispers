@@ -204,3 +204,9 @@ whisper_models/
 
 # Beads archive (migrated to Jira 2026-04-13)
 .beads-archive.zip
+
+# Local draft/helper files not included in final submission
+README_bilingual.md
+README.md.before_rewrite
+README.md.save
+final_submission/
